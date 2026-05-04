@@ -1,0 +1,138 @@
+use gtk4 as gtk;
+use gtk::prelude::*;
+use sysinfo::System;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::process::Command;
+
+fn main() {
+    let app = gtk::Application::builder()
+        .application_id("com.example.taskmanager")
+        .build();
+
+    app.connect_activate(build_ui);
+    app.run();
+}
+
+fn build_ui(app: &gtk::Application) {
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("Rust Linux Task Manager")
+        .default_width(600)
+        .default_height(500)
+        .build();
+
+    let notebook = gtk::Notebook::new();
+
+    // --- TAB 1: TASKS ---
+    let task_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(10)
+        .margin_bottom(10)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Enter a new task...")
+        .build();
+
+    let add_btn = gtk::Button::with_label("Add Task");
+    
+    let task_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+
+    let entry_clone = entry.clone();
+    let list_clone = task_list.clone();
+
+    add_btn.connect_clicked(move |_| {
+        let text = entry_clone.text();
+        if !text.is_empty() {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            
+            let label = gtk::Label::builder()
+                .label(text.as_str())
+                .hexpand(true)
+                .halign(gtk::Align::Start)
+                .build();
+                
+            let del_btn = gtk::Button::with_label("Delete");
+            
+            row.append(&label);
+            row.append(&del_btn);
+
+            let row_inner = row.clone();
+            let list_inner = list_clone.clone();
+            
+            del_btn.connect_clicked(move |_| {
+                if let Some(p) = row_inner.parent() {
+                    list_inner.remove(&p);
+                } else {
+                    row_inner.unparent();
+                }
+            });
+
+            list_clone.append(&row);
+            entry_clone.set_text("");
+        }
+    });
+
+    task_box.append(&entry);
+    task_box.append(&add_btn);
+    task_box.append(&task_list);
+    notebook.append_page(&task_box, Some(&gtk::Label::new(Some("Tasks"))));
+
+    // --- TAB 2: SYSTEM (NEOFETCH) ---
+    let neo_text = gtk::TextView::new();
+    neo_text.set_editable(false);
+    neo_text.set_monospace(true);
+    
+    let output = Command::new("neofetch")
+        .arg("--stdout")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_else(|_| "Please install neofetch: sudo apt install neofetch".to_string());
+    
+    neo_text.buffer().set_text(&output);
+    notebook.append_page(&neo_text, Some(&gtk::Label::new(Some("System"))));
+
+    // --- TAB 3: RESOURCES ---
+    let resource_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .margin_top(20)
+	.margin_bottom(20)
+	.margin_start(20)
+	.margin_end(20)
+        .build();
+
+    let stats_label = gtk::Label::new(None);
+    resource_box.append(&stats_label);
+
+    let sys = Rc::new(RefCell::new(System::new_all()));
+    let stats_label_clone = stats_label.clone();
+    
+    glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+        let mut s = sys.borrow_mut();
+        s.refresh_all();
+        
+        let cpu_usage = s.global_cpu_info().cpu_usage();
+        let total_mem = s.total_memory() / 1024 / 1024;
+        let used_mem = s.used_memory() / 1024 / 1024;
+
+        let display = format!(
+            "CPU Usage: {:.1}%\n\nMemory: {} MB / {} MB\n\nProcesses: {}",
+            cpu_usage, used_mem, total_mem, s.processes().len()
+        );
+        
+        stats_label_clone.set_text(&display);
+        glib::ControlFlow::Continue
+    });
+
+    notebook.append_page(&resource_box, Some(&gtk::Label::new(Some("Resources"))));
+
+    window.set_child(Some(&notebook));
+    window.show();
+}

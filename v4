@@ -1,0 +1,188 @@
+use gtk4 as gtk;
+use gtk::prelude::*;
+use gtk::gio; // Import gio from gtk
+use sysinfo::System;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+fn main() {
+    let app = gtk::Application::builder()
+        .application_id("com.example.taskmanager")
+        .build();
+
+    app.connect_activate(build_ui);
+    app.run();
+}
+
+fn build_ui(app: &gtk::Application) {
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("Rust Task Manager Pro")
+        .default_width(800)
+        .default_height(600)
+        .build();
+
+    let notebook = gtk::Notebook::new();
+    let sys = Rc::new(RefCell::new(System::new_all()));
+
+    // --- TAB 1: PROCESSES ---
+    let process_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let scrolled_window = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
+
+    // ListStore handles the data for our table
+    let list_store = gio::ListStore::new::<ProcessWrapper>();
+    let selection_model = gtk::SingleSelection::new(Some(list_store.clone()));
+    let column_view = gtk::ColumnView::new(Some(selection_model));
+
+    // Column 1: Name
+    let name_factory = gtk::SignalListItemFactory::new();
+    name_factory.connect_setup(|_, list_item| {
+        list_item.set_child(Some(&gtk::Label::builder().halign(gtk::Align::Start).margin_start(10).build()));
+    });
+    name_factory.connect_bind(|_, list_item| {
+        let wrapper = list_item.item().unwrap().downcast::<ProcessWrapper>().unwrap();
+        let label = list_item.child().unwrap().downcast::<gtk::Label>().unwrap();
+        label.set_text(&wrapper.name());
+    });
+    column_view.append_column(&gtk::ColumnViewColumn::new(Some("Process Name"), Some(name_factory)));
+
+    // Column 2: PID
+    let pid_factory = gtk::SignalListItemFactory::new();
+    pid_factory.connect_setup(|_, list_item| {
+        list_item.set_child(Some(&gtk::Label::new(None)));
+    });
+    pid_factory.connect_bind(|_, list_item| {
+        let wrapper = list_item.item().unwrap().downcast::<ProcessWrapper>().unwrap();
+        let label = list_item.child().unwrap().downcast::<gtk::Label>().unwrap();
+        label.set_text(&wrapper.pid().to_string());
+    });
+    column_view.append_column(&gtk::ColumnViewColumn::new(Some("PID"), Some(pid_factory)));
+
+    scrolled_window.set_child(Some(&column_view));
+    process_box.append(&scrolled_window);
+    notebook.append_page(&process_box, Some(&gtk::Label::new(Some("Processes"))));
+
+    // --- TAB 2: PERFORMANCE (Graph) ---
+    let performance_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(20)
+        .margin_top(20).margin_bottom(20).margin_start(20).margin_end(20)
+        .build();
+
+    let graph_area = gtk::DrawingArea::builder()
+        .content_height(200)
+        .vexpand(true)
+        .build();
+
+    let history = Rc::new(RefCell::new(vec![0.0f32; 100]));
+    let history_clone = history.clone();
+
+    graph_area.set_draw_func(move |_, cr, width, height| {
+        let h = history_clone.borrow();
+        cr.set_source_rgb(0.05, 0.05, 0.05); // Dark background
+        cr.paint().unwrap();
+
+        // Grid lines
+        cr.set_source_rgba(0.0, 0.8, 0.0, 0.1);
+        for i in 1..5 {
+            let y = (height as f64 / 5.0) * i as f64;
+            cr.move_to(0.0, y);
+            cr.line_to(width as f64, y);
+            cr.stroke().unwrap();
+        }
+
+        // Draw CPU mountain graph
+        cr.set_source_rgb(0.0, 0.7, 0.0);
+        cr.set_line_width(2.0);
+        let step = width as f64 / 99.0;
+        
+        cr.move_to(0.0, height as f64);
+        for (i, &usage) in h.iter().enumerate() {
+            let x = i as f64 * step;
+            let y = height as f64 - (usage as f64 / 100.0 * height as f64);
+            cr.line_to(x, y);
+        }
+        cr.line_to(width as f64, height as f64);
+        cr.fill().unwrap(); // Filled "mountain" look
+    });
+
+    performance_box.append(&gtk::Label::new(Some("CPU Load History")));
+    performance_box.append(&graph_area);
+    notebook.append_page(&performance_box, Some(&gtk::Label::new(Some("Performance"))));
+
+    // --- REFRESH LOGIC ---
+    let sys_ref = sys.clone();
+    let history_ref = history.clone();
+    let area_ref = graph_area.clone();
+    let store_ref = list_store.clone();
+
+    glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+        let mut s = sys_ref.borrow_mut();
+        s.refresh_all();
+
+        // Update Graph History
+        let mut h = history_ref.borrow_mut();
+        h.remove(0);
+        h.push(s.global_cpu_info().cpu_usage());
+        area_ref.queue_draw();
+
+        // Update Process List
+        store_ref.remove_all();
+        // Just showing top 50 processes to keep it smooth
+        let mut processes: Vec<_> = s.processes().values().collect();
+        processes.sort_by(|a, b| b.memory().cmp(&a.memory()));
+        
+        for p in processes.iter().take(50) {
+            store_ref.append(&ProcessWrapper::new(p.name().to_string(), p.pid().as_u32()));
+        }
+
+        glib::ControlFlow::Continue
+    });
+
+    window.set_child(Some(&notebook));
+    window.show();
+}
+
+// --- GOBJECT WRAPPER ---
+// These imports are what fixed your .imp() errors!
+mod imp {
+    use gtk4 as gtk;
+    use gtk::glib;
+    use gtk::subclass::prelude::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    pub struct ProcessWrapper {
+        pub name: RefCell<String>,
+        pub pid: RefCell<u32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for ProcessWrapper {
+        const NAME: &'static str = "ProcessWrapper";
+        type Type = super::ProcessWrapper;
+    }
+
+    impl ObjectImpl for ProcessWrapper {}
+}
+
+glib::wrapper! {
+    pub struct ProcessWrapper(ObjectSubclass<imp::ProcessWrapper>);
+}
+
+// Import the trait that provides the .imp() method
+use glib::subclass::types::ObjectSubclassIsExt;
+
+impl ProcessWrapper {
+    pub fn new(name: String, pid: u32) -> Self {
+        let obj: Self = glib::Object::new();
+        obj.imp().name.replace(name);
+        obj.imp().pid.replace(pid);
+        obj
+    }
+    pub fn name(&self) -> String { self.imp().name.borrow().clone() }
+    pub fn pid(&self) -> u32 { *self.imp().pid.borrow() }
+}
